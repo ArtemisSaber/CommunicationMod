@@ -1,9 +1,12 @@
 package communicationmod;
 
+import basemod.ReflectionHacks;
 import com.megacrit.cardcrawl.actions.GameActionManager;
 import com.megacrit.cardcrawl.core.CardCrawlGame;
 import com.megacrit.cardcrawl.dungeons.AbstractDungeon;
+import com.megacrit.cardcrawl.monsters.AbstractMonster;
 import com.megacrit.cardcrawl.neow.NeowRoom;
+import com.megacrit.cardcrawl.relics.RunicDome;
 import com.megacrit.cardcrawl.rooms.AbstractRoom;
 import com.megacrit.cardcrawl.rooms.EventRoom;
 import com.megacrit.cardcrawl.rooms.VictoryRoom;
@@ -20,6 +23,8 @@ public class GameStateListener {
     private static boolean waitingForCommand = false;
     private static boolean hasPresentedOutOfGameState = false;
     private static boolean waitOneUpdate = false;
+    private static final int INTENT_WAIT_FRAMES = 10;
+    private static int intentWaitFrames = 0;
     private static int timeout = 0;
 
     /**
@@ -89,6 +94,67 @@ public class GameStateListener {
         blocked = false;
         waitingForCommand = false;
         waitOneUpdate = false;
+        intentWaitFrames = 0;
+    }
+
+    /**
+     * Detects whether all active monster intents have been populated.
+     *
+     * @return whether active monsters have moved past the temporary DEBUG intent
+     */
+    public static boolean isIntentReady() {
+        if (AbstractDungeon.player != null && AbstractDungeon.player.hasRelic(RunicDome.ID)) {
+            // No need to check intent as they are hidden anyway.
+            return true;
+        }
+
+        AbstractRoom currentRoom = AbstractDungeon.getCurrRoom();
+        if (currentRoom == null || currentRoom.monsters == null) {
+            // No need to check intent for non-combat status.
+            return true;
+        }
+
+        for (AbstractMonster monster : currentRoom.monsters.monsters) {
+            if (monster != null
+                    && !monster.isDeadOrEscaped()
+                    && !monster.halfDead
+                    && monster.intent == AbstractMonster.Intent.DEBUG) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static void createReadyMonsterIntents() {
+        AbstractRoom currentRoom = AbstractDungeon.getCurrRoom();
+        if (currentRoom == null || currentRoom.monsters == null) {
+            return;
+        }
+
+        for (AbstractMonster monster : currentRoom.monsters.monsters) {
+            if (monster != null
+                    && !monster.isDeadOrEscaped()
+                    && !monster.halfDead
+                    && monster.intent == AbstractMonster.Intent.DEBUG
+                    && ReflectionHacks.getPrivate(monster, AbstractMonster.class, "move") != null) {
+                monster.createIntent();
+            }
+        }
+    }
+
+    private static boolean shouldWaitForIntent(boolean inCombat, boolean screenUp) {
+        if (!inCombat || screenUp || isIntentReady()) {
+            intentWaitFrames = 0;
+            return false;
+        }
+
+        if (intentWaitFrames < INTENT_WAIT_FRAMES) {
+            intentWaitFrames += 1;
+            return true;
+        }
+        createReadyMonsterIntents();
+        intentWaitFrames = 0;
+        return false;
     }
 
     /**
@@ -137,12 +203,16 @@ public class GameStateListener {
             if (inCombat) {
                 // In combat, newScreenUp being true indicates an action that requires our immediate attention.
                 if (newScreenUp) {
+                    shouldWaitForIntent(inCombat, newScreenUp);
                     return true;
                 }
                 // In combat, if no screen is up, we should wait for all actions to complete before indicating a state change.
                 else if (AbstractDungeon.actionManager.phase.equals(GameActionManager.Phase.WAITING_ON_USER)
                         && AbstractDungeon.actionManager.cardQueue.isEmpty()
                         && AbstractDungeon.actionManager.actions.isEmpty()) {
+                    if (shouldWaitForIntent(inCombat, newScreenUp)) {
+                        return false;
+                    }
                     return true;
                 }
 
@@ -173,6 +243,9 @@ public class GameStateListener {
                 && AbstractDungeon.actionManager.preTurnActions.isEmpty()
                 && AbstractDungeon.actionManager.actions.isEmpty()
                 && AbstractDungeon.actionManager.cardQueue.isEmpty()) {
+            if (shouldWaitForIntent(inCombat, newScreenUp)) {
+                return false;
+            }
             return true;
         }
         // In a grid select screen, if a confirm screen comes up or goes away, it doesn't change any other state.
@@ -185,6 +258,7 @@ public class GameStateListener {
         // Sometimes, we need to register an external change in combat while an action is resolving which brings
         // the screen up. Because the screen did not change, this is not covered by other cases.
         if (externalChange && inCombat && newScreenUp) {
+            shouldWaitForIntent(inCombat, newScreenUp);
             return true;
         }
         if (timeout > 0) {
